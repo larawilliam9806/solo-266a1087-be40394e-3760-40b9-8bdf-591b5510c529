@@ -1,0 +1,14 @@
+services:
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # 生产环境请改成随机长字符串
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key}
+    volumes:
+      - gazetteer-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  gazetteer-data:

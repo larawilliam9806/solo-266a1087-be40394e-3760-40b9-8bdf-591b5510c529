@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>旧地名名录 · 补档</title>
+<style>
+  :root { --ink:#2b2b2b; --line:#d8d2c4; --bg:#f7f4ec; --card:#fffdf8;
+          --accent:#7a5c2e; --ok:#2e7d32; --err:#b3261e; --warn:#9a6a00; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px; background:var(--bg); color:var(--ink);
+         font:15px/1.6 "Songti SC","Noto Serif CJK SC","SimSun",serif; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  h2 { font-size:17px; margin:0 0 10px; padding-bottom:6px;
+       border-bottom:2px solid var(--accent); color:var(--accent); }
+  .sub { color:#6b6353; font-size:13px; margin-bottom:20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px;
+          padding:16px 18px; margin-bottom:18px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+  @media (max-width: 900px) { .grid { grid-template-columns:1fr; } }
+  table { border-collapse:collapse; width:100%; font-size:14px; }
+  th, td { border:1px solid var(--line); padding:5px 9px; text-align:left;
+           vertical-align:top; }
+  th { background:#efe9da; white-space:nowrap; }
+  code, .mono { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+                font-size:12.5px; }
+  .flash { border-radius:6px; padding:8px 12px; margin-bottom:8px; font-size:14px; }
+  .flash.success { background:#e6f2e6; color:var(--ok); border:1px solid #b9d8b9; }
+  .flash.error   { background:#fbe9e7; color:var(--err); border:1px solid #eec5c0; }
+  .flash.warning { background:#fdf3d7; color:var(--warn); border:1px solid #ecd9a0; }
+  button, input[type=file], input[type=text] { font:inherit; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:5px;
+           padding:5px 14px; cursor:pointer; }
+  button:hover { background:#63491f; }
+  input[type=text] { padding:5px 8px; border:1px solid var(--line); border-radius:5px;
+                     width:220px; background:#fff; }
+  .tag { display:inline-block; border-radius:4px; padding:0 6px; font-size:12px; }
+  .tag.ok   { background:#e6f2e6; color:var(--ok); }
+  .tag.bad  { background:#fbe9e7; color:var(--err); }
+  .tag.miss { background:#fdf3d7; color:var(--warn); }
+  .muted { color:#8a8171; font-size:13px; }
+  .stat { display:inline-block; margin-right:22px; }
+  .stat b { font-size:19px; }
+  details { margin-top:6px; }
+  summary { cursor:pointer; color:var(--accent); font-size:13px; }
+</style>
+</head>
+<body>
+<h1>旧地名名录 · 补档页</h1>
+<div class="sub">上传备份 ZIP（整表 / 逐版更正包 + 清单），选择目标正式版恢复；名录每行依次为地名编号、名称、行政村。</div>
+
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% for category, message in messages %}
+    <div class="flash {{ category }}">{{ message }}</div>
+  {% endfor %}
+{% endwith %}
+
+<div class="card">
+  <h2>当前名录</h2>
+  <div style="margin-bottom:10px">
+    <span class="stat">当前版本 <b>{{ current_version or '（尚未恢复）' }}</b></span>
+    <span class="stat">名录行数 <b>{{ total }}</b></span>
+  </div>
+  <form method="get" action="{{ url_for('index') }}">
+    <input type="text" name="q" value="{{ q }}" placeholder="按地名编号查询，如 P0001">
+    <button type="submit">查询</button>
+    {% if q %}<a href="{{ url_for('index') }}" class="muted">清除</a>{% endif %}
+  </form>
+  {% if search_note %}<div class="muted" style="margin:6px 0">{{ search_note }}</div>{% endif %}
+  {% if rows %}
+  <table style="margin-top:8px">
+    <tr><th>地名编号</th><th>名称</th><th>行政村</th></tr>
+    {% for r in rows %}
+    <tr><td class="mono">{{ r['id'] }}</td><td>{{ r['name'] }}</td><td>{{ r['village'] }}</td></tr>
+    {% endfor %}
+  </table>
+  {% if not q and total > rows|length %}
+    <div class="muted" style="margin-top:6px">仅显示前 {{ rows|length }} 行（共 {{ total }} 行），请按编号查询。</div>
+  {% endif %}
+  {% elif not q %}
+    <div class="muted" style="margin-top:8px">名录为空，请先上传备份包并恢复。</div>
+  {% endif %}
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2>上传备份 ZIP</h2>
+    <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
+      <input type="file" name="file" accept=".zip" required>
+      <button type="submit">上传</button>
+    </form>
+    <div class="muted" style="margin-top:8px">
+      包内需含清单 <code>manifest.json</code>：列出各正式版的名录摘要（SHA-256）、
+      全量文件的版号、增量文件的起止版。
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>可恢复版本</h2>
+    {% if versions %}
+    <table>
+      <tr><th>正式版</th><th>名录摘要</th><th>全量</th><th>增量(入/出)</th><th></th></tr>
+      {% for v in versions %}
+      <tr>
+        <td class="mono">{{ v.version }}</td>
+        <td class="mono">
+          {% if v.digests %}
+            {% for d in v.digests|sort %}<span title="{{ d }}">{{ d[:12] }}…</span>{% if not loop.last %}<br>{% endif %}{% endfor %}
+          {% else %}<span class="tag miss">清单未登记</span>{% endif %}
+        </td>
+        <td>
+          {% if v.fulls %}
+            {{ v.fulls_present }}/{{ v.fulls }} 个可用
+          {% else %}<span class="muted">无</span>{% endif %}
+        </td>
+        <td>{{ v.inc_in }} / {{ v.inc_out }}</td>
+        <td>
+          <form method="post" action="{{ url_for('restore') }}"
+                onsubmit="return confirm('确认把名录恢复到版本 {{ v.version }}？');">
+            <input type="hidden" name="version" value="{{ v.version }}">
+            <button type="submit">恢复到此版</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+      <div class="muted">尚未上传任何备份包。</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <h2>备份包与清单</h2>
+  {% if uploads %}
+    {% for u in uploads %}
+    <div style="margin-bottom:12px">
+      <b>{{ u.row['filename'] }}</b>
+      <span class="muted">#{{ u.row['id'] }} · {{ u.row['uploaded_at'] }}</span>
+      <div class="muted">{{ u.row['note'] }}</div>
+      <details>
+        <summary>清单明细</summary>
+        <table style="margin-top:6px">
+          <tr><th>类别</th><th>版号 / 起止版</th><th>内容</th></tr>
+          {% for d in u.digests %}
+          <tr><td>正式版摘要</td><td class="mono">{{ d['version'] }}</td>
+              <td class="mono">{{ d['sha256'] }}</td></tr>
+          {% endfor %}
+          {% for f in u.fulls %}
+          <tr><td>全量文件</td><td class="mono">{{ f['version'] }}</td>
+              <td class="mono">{{ f['arcname'] }}
+                {% if not f['present'] %}<span class="tag miss">包内缺失</span>{% endif %}</td></tr>
+          {% endfor %}
+          {% for i in u.incs %}
+          <tr><td>增量文件</td><td class="mono">{{ i['from_version'] }} → {{ i['to_version'] }}</td>
+              <td class="mono">{{ i['arcname'] }}
+                {% if not i['present'] %}<span class="tag miss">包内缺失</span>{% endif %}</td></tr>
+          {% endfor %}
+        </table>
+      </details>
+    </div>
+    {% endfor %}
+  {% else %}
+    <div class="muted">暂无备份包。</div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>恢复记录</h2>
+  {% if recoveries %}
+  <table>
+    <tr><th>#</th><th>时间</th><th>目标版</th><th>结果</th><th>使用的备份文件 / 失败原因</th></tr>
+    {% for rec in recoveries %}
+    <tr>
+      <td class="mono">{{ rec.row['id'] }}</td>
+      <td class="mono">{{ rec.row['created_at'] }}</td>
+      <td class="mono">{{ rec.row['target_version'] }}</td>
+      <td>
+        {% if rec.row['status'] == 'success' %}<span class="tag ok">成功</span>
+        {% else %}<span class="tag bad">失败</span>{% endif %}
+      </td>
+      <td>
+        {% if rec.row['status'] == 'success' %}
+          {% for f in rec.files %}
+            <div class="mono">
+              {{ '整表' if f['kind'] == 'full' else '增量' }}
+              {{ f['version_span'] }} — {{ f['source'] }}
+            </div>
+          {% endfor %}
+        {% else %}
+          {{ rec.row['reason'] }}
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+    <div class="muted">暂无恢复记录。</div>
+  {% endif %}
+</div>
+
+</body>
+</html>
