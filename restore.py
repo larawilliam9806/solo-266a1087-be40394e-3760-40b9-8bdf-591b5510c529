@@ -5,17 +5,20 @@
 紧凑的 UTF-8 JSON 数组（保留非 ASCII 字符），再核对清单中的 SHA-256。
 
 恢复策略：
-  * 从某个全量表起步；
-  * 每个增量的起始版必须与上一步还原版相同；
-  * 遇到缺包、非法增删改或摘要不符就试其他链；
-  * 同一次恢复中，已校验的中间版直接复用（self.verified 缓存）。
+  * 每条链只认同一份清单登记的摘要：整表/增量按清单版号接力，
+    不会把甲清单的还原结果拿去对乙清单的摘要；
+  * 从某个全量表起步；每个增量的起始版必须与上一步还原版相同；
+  * 一份中间名录走不通（缺包、非法增删改、摘要不符）时，继续尝试
+    同版其他能从整表或增量还原、且通过本清单校验的名录；
+  * 同版同摘要的中间名录在尝试多个后续增量时复用已还原结果
+    （verified 以 (版号, 摘要) 为键）。
 """
 from __future__ import annotations
 
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 # 名录行： [编号, 名称, 行政村]
 Row = List[str]
@@ -183,9 +186,12 @@ def apply_ops(state: Dict[str, Row], ops, where: str) -> Dict[str, Row]:
 @dataclass
 class FullFile:
     version: str
-    label: str                       # 人类可读来源，如 “backup.zip :: full_v1.json”
+    label: str                       # 人类可读来源，如 “#3 backup.zip :: full_v1.json”
     present: bool = True             # False 表示清单引用了但包内缺失
     loader: Optional[Callable[[], str]] = None
+    # 所属清单的 版号 -> 摘要集合 映射；链上每一步只与本清单的摘要核对。
+    # None 表示未提供清单归属（旧用法），退回全局摘要集合。
+    digest_scope: Optional[Dict[str, Set[str]]] = None
 
 
 @dataclass
@@ -195,23 +201,29 @@ class Increment:
     label: str
     present: bool = True
     loader: Optional[Callable[[], str]] = None
+    digest_scope: Optional[Dict[str, Set[str]]] = None
+
+
+# 名录摘要 -> 还原结果 的缓存条目
+VerifiedEntry = Tuple[Dict[str, Row], List[Step]]
 
 
 class Restorer:
-    """在一次恢复会话内找链、校验、复用中间版。"""
+    """在一次恢复会话内找链、校验、复用同版同摘要的中间名录。"""
 
     def __init__(self, digests: Dict[str, set], fulls: List[FullFile],
                  increments: List[Increment]):
-        self.digests = digests          # 版本 -> 清单登记的 SHA-256 集合
+        self.digests = digests          # 版本 -> 全局清单摘要集合（兜底用）
         self.fulls = fulls
         self.increments = increments
-        self.verified: Dict[str, Tuple[Dict[str, Row], List[Step]]] = {}
+        # 已校验中间版：键 (版号, 摘要)，值 (名录状态, 恢复步骤)
+        self.verified: Dict[Tuple[str, str], VerifiedEntry] = {}
         self.reasons: List[str] = []
 
     # -- 对外入口 -------------------------------------------------
     def restore(self, target: str) -> Tuple[Dict[str, Row], List[Step]]:
         target = str(target)
-        result = self._reach(target, [])
+        result = self._reach(target, None, [])
         if result is None:
             if not self.reasons:
                 self.reasons.append(
@@ -220,35 +232,65 @@ class Restorer:
         return result
 
     # -- 内部 -----------------------------------------------------
-    def _check(self, version: str, state: Dict[str, Row], steps: List[Step]):
-        """核对某一步还原结果的摘要；通过则缓存为已校验中间版。"""
-        expected = self.digests.get(version)
+    def _expected_digests(self, version: str,
+                          scope: Optional[Dict[str, Set[str]]]) -> Optional[Set[str]]:
+        """该步核对所用的摘要集合：优先用所属清单，否则退回全局集合。"""
+        if scope is not None:
+            return scope.get(version)
+        return self.digests.get(version)
+
+    def _check(self, version: str, state: Dict[str, Row], steps: List[Step],
+               scope: Optional[Dict[str, Set[str]]]):
+        """核对某一步还原结果的摘要；通过则按 (版号, 摘要) 缓存。"""
+        expected = self._expected_digests(version, scope)
         if not expected:
             self.reasons.append(f"清单中没有版本 {version} 的名录摘要，无法核对")
             return None
         digest = digest_rows(list(state.values()))
         if digest in expected:
-            self.verified[version] = (state, steps)
-            return self.verified[version]
+            self.verified[(version, digest)] = (state, steps)
+            return self.verified[(version, digest)]
         exp = "、".join(sorted(e[:16] + "…" for e in expected))
         self.reasons.append(
             f"版本 {version} 摘要不符：清单登记 {exp}，实得 {digest[:16]}…")
         return None
 
-    def _reach(self, version: str, stack: List[str]):
-        # 同次恢复复用已校验的中间版
-        if version in self.verified:
-            return self.verified[version]
+    def _cached(self, version: str,
+                scope: Optional[Dict[str, Set[str]]]) -> Optional[VerifiedEntry]:
+        """复用同版同摘要、已通过校验的中间名录（跨同摘要清单也安全）。"""
+        expected = self._expected_digests(version, scope)
+        if not expected:
+            return None
+        for digest in expected:
+            hit = self.verified.get((version, digest))
+            if hit is not None:
+                return hit
+        return None
+
+    def _reach(self, version: str, scope: Optional[Dict[str, Set[str]]],
+               stack: List[str]):
+        """还原 version。scope 为所属清单的摘要映射；同清单的文件才能接力。
+
+        同版同摘要且已校验的中间名录直接复用；同版不同摘要（不同清单的
+        两份名录）分别还原，互不顶替。
+        """
         if version in stack:
             self.reasons.append(
                 "版本链出现循环：" + " → ".join(stack + [version]))
             return None
+        cached = self._cached(version, scope)
+        if cached is not None:
+            return cached
         stack = stack + [version]
 
-        # 1) 全量表直接起步
+        same_scope = lambda s: scope is None or s is None or s is scope
+        has_candidate = False
+
+        # 1) 全量表直接起步：只取按清单版号对得上、且与当前链同清单的整表
         for full in self.fulls:
-            if full.version != version:
+            if full.version != version or not same_scope(full.digest_scope):
                 continue
+            has_candidate = True
             if not full.present or full.loader is None:
                 self.reasons.append(f"缺少全量文件 {full.label}（版 {version}）")
                 continue
@@ -259,21 +301,25 @@ class Restorer:
                 continue
             state = {r[0]: r for r in rows}
             got = self._check(version, state,
-                              [("full", full.label, version)])
+                              [("full", full.label, version)],
+                              full.digest_scope)
             if got:
                 return got
 
-        # 2) 增量接力：起始版须与上一步还原版相同
-        incoming = [i for i in self.increments if i.to_version == version]
+        # 2) 增量接力：起始版须与上一步还原版相同，且增量与当前链同清单
+        incoming = [i for i in self.increments
+                    if i.to_version == version and same_scope(i.digest_scope)]
         for inc in incoming:
-            base = self._reach(inc.from_version, stack)
-            if base is None:
-                continue  # 原因已在递归中记录，试其他链
-            base_state, base_steps = base
+            has_candidate = True
+            # 缺包先记下原因，再看这条链的其余环节能否走通
             if not inc.present or inc.loader is None:
                 self.reasons.append(
                     f"缺少增量文件 {inc.label}（{inc.from_version}→{inc.to_version}）")
                 continue
+            base = self._reach(inc.from_version, inc.digest_scope, stack)
+            if base is None:
+                continue  # 原因已在递归中记录，试其他链 / 其他清单
+            base_state, base_steps = base
             try:
                 ops = parse_increment(inc.loader(), inc.label)
                 state = apply_ops(base_state, ops, inc.label)
@@ -283,11 +329,12 @@ class Restorer:
             got = self._check(
                 version, state,
                 base_steps + [("increment", inc.label,
-                               f"{inc.from_version}→{inc.to_version}")])
+                               f"{inc.from_version}→{inc.to_version}")],
+                inc.digest_scope)
             if got:
                 return got
 
-        if not any(f.version == version for f in self.fulls) and not incoming:
+        if not has_candidate:
             self.reasons.append(
-                f"版本 {version} 没有全量文件，也没有指向它的增量包")
+                f"版本 {version} 没有全量文件，也没有指向它的同清单增量包，无法成链")
         return None

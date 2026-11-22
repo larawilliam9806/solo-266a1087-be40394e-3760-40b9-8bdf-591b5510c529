@@ -186,6 +186,60 @@ class AppTestCase(unittest.TestCase):
         self.assertIn("恢复 v9 失败".encode(), r.data)
         self.assertEqual(self.gazetteer(), [])
 
+    # ---------------- 同一版两份备份、清单摘要各不相同 ----------------
+    def test_two_lineages_same_named_zip_uses_working_manifest(self):
+        # 两份 ZIP 同名，靠上传批次（#1/#2）区分
+        r = self.upload(sample.lineage_a_zip(), "backup.zip")
+        self.assertIn("已接收备份包".encode(), r.data)
+        r = self.upload(sample.lineage_b_zip(), "backup.zip")
+        self.assertIn("已接收备份包".encode(), r.data)
+
+        # A 清单先校验通过的 v2 接不上更名包；应自动改用 B 清单的链恢复 v3
+        r = self.restore("v3")
+        self.assertIn("已恢复到版本 v3".encode(), r.data)
+        self.assertEqual(self.gazetteer(), sorted(sample.V3_ROWS))
+        self.assertEqual(self.meta("current_version"), "v3")
+
+        rec = self.query("SELECT * FROM recoveries WHERE status = 'success'")
+        self.assertEqual(len(rec), 1)
+        files = self.query(
+            "SELECT * FROM recovery_files WHERE recovery_id = ?"
+            " ORDER BY id", (rec[0]["id"],))
+        # 每步列出上传批次和包内路径，同名 ZIP 也能区分
+        self.assertEqual([f["kind"] for f in files], ["full", "increment"])
+        self.assertTrue(all("#2 backup.zip ::" in f["source"] for f in files))
+        self.assertIn("full_v2.json", files[0]["source"])
+        self.assertIn("inc_v2_v3.json", files[1]["source"])
+        self.assertEqual(files[1]["version_span"], "v2→v3")
+
+        # 页面展示两条上传批次与成功记录里的批次号
+        page = self.client.get("/").get_data(as_text=True)
+        self.assertIn("#1", page)
+        self.assertIn("#2", page)
+
+    def test_broken_lineage_failure_explains_and_keeps_history(self):
+        # 只有坏链（A 清单的 v2→v3 非法）：页面说明原因，原名录不动，留失败记录
+        self.upload(sample.lineage_a_zip(), "backup.zip")
+        r = self.restore("v3")
+        self.assertIn("恢复 v3 失败".encode(), r.data)
+        self.assertIn("没有原记录".encode(), r.data)
+        self.assertEqual(self.gazetteer(), [])
+        self.assertEqual(
+            [row["status"] for row in self.query("SELECT * FROM recoveries")],
+            ["failed"])
+
+        # 再补一份能恢复 v2 的包：原名录可恢复，失败记录与新成功记录都可查
+        self.upload(sample.good_zip(), "good.zip")
+        self.restore("v2")
+        self.assertEqual(self.gazetteer(), sorted(sample.V2_ROWS))
+        self.assertEqual(self.meta("current_version"), "v2")
+        page = self.client.get("/").get_data(as_text=True)
+        self.assertIn("恢复记录", page)
+        self.assertIn("good.zip", page)
+        statuses = [row["status"] for row in
+                    self.query("SELECT * FROM recoveries ORDER BY id")]
+        self.assertEqual(statuses, ["failed", "success"])
+
 
 if __name__ == "__main__":
     unittest.main()

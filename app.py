@@ -213,6 +213,13 @@ def _build_restorer(db):
     for r in db.execute("SELECT version, sha256 FROM version_digests"):
         digests.setdefault(r["version"], set()).add(r["sha256"])
 
+    # 每个上传批次（每份清单）各自的 版号 -> 摘要集合，链上只按本清单核对
+    scopes = {}
+    for r in db.execute(
+            "SELECT upload_id, version, sha256 FROM version_digests"):
+        scopes.setdefault(r["upload_id"], {}).setdefault(
+            r["version"], set()).add(r["sha256"])
+
     def loader_for(stored_path):
         if not stored_path:
             return None
@@ -223,25 +230,29 @@ def _build_restorer(db):
 
     fulls = []
     for r in db.execute(
-            "SELECT f.version, f.arcname, f.stored_path, f.present, u.filename"
+            "SELECT f.upload_id, f.version, f.arcname, f.stored_path,"
+            " f.present, u.filename"
             " FROM full_files f JOIN uploads u ON u.id = f.upload_id"
             " ORDER BY f.id"):
-        label = f"{r['filename']} :: {r['arcname']}"
+        # 带上上传批次，同名 ZIP 也能区分
+        label = f"#{r['upload_id']} {r['filename']} :: {r['arcname']}"
         fulls.append(FullFile(version=r["version"], label=label,
                               present=bool(r["present"]),
-                              loader=loader_for(r["stored_path"])))
+                              loader=loader_for(r["stored_path"]),
+                              digest_scope=scopes.get(r["upload_id"])))
     increments = []
     for r in db.execute(
-            "SELECT i.from_version, i.to_version, i.arcname, i.stored_path,"
-            " i.present, u.filename"
+            "SELECT i.upload_id, i.from_version, i.to_version, i.arcname,"
+            " i.stored_path, i.present, u.filename"
             " FROM increments i JOIN uploads u ON u.id = i.upload_id"
             " ORDER BY i.id"):
-        label = f"{r['filename']} :: {r['arcname']}"
+        label = f"#{r['upload_id']} {r['filename']} :: {r['arcname']}"
         increments.append(Increment(from_version=r["from_version"],
                                     to_version=r["to_version"],
                                     label=label,
                                     present=bool(r["present"]),
-                                    loader=loader_for(r["stored_path"])))
+                                    loader=loader_for(r["stored_path"]),
+                                    digest_scope=scopes.get(r["upload_id"])))
     return Restorer(digests, fulls, increments)
 
 

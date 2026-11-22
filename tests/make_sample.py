@@ -162,6 +162,49 @@ def brokenv4_zip():
     })
 
 
+# ------------------------------------------------- 同版两份名录、摘要不同
+# B 清单里的 v2：与标准 V2_ROWS 内容不同（少 P0011），摘要自然不同
+V2B_ROWS = [r for r in V2_ROWS if r[0] != "P0011"]
+D2B = digest(V2B_ROWS)
+# B 的 v2→v3 增量：只作用在 B 的 v2 上，还原结果与标准 v3 完全一致（同摘要 D3）
+INC23_FROM_B = {
+    "add": [["P0011", "赵家堡", "赵家乡"],
+            ["P0012", "孙家沟", "孙家乡"]],
+    "modify": [["P0001", "张家庄", "张家乡"]],
+    "delete": [],
+}
+# A 的 v2→v3 更名包：操作非法（删除不存在的编号），A 的链在 v3 断掉
+INC23_ILLEGAL = {"add": [], "modify": [], "delete": ["P9999"]}
+
+
+def lineage_a_zip():
+    """A 备份：全量 v1/v2 + 合法 v1→v2，但 v2→v3 更名包非法。"""
+    return _zip({
+        "manifest.json": _manifest(
+            [("v1", D1), ("v2", D2), ("v3", D3)],
+            [("v1", "full_v1.json"), ("v2", "full_v2.json")],
+            [("v1", "v2", "inc_v1_v2.json"),
+             ("v2", "v3", "inc_v2_v3.json")]),
+        "full_v1.json": _rows_json(V1_ROWS),
+        "full_v2.json": _rows_json(V2_ROWS),
+        "inc_v1_v2.json": json.dumps(INC12, ensure_ascii=False),
+        "inc_v2_v3.json": json.dumps(INC23_ILLEGAL, ensure_ascii=False),
+    })
+
+
+def lineage_b_zip():
+    """B 备份：另一份 v2 名录（摘要 D2B）+ 能还原到目标 v3 的增量。"""
+    assert digest(apply(V2B_ROWS, INC23_FROM_B)) == D3
+    return _zip({
+        "manifest.json": _manifest(
+            [("v2", D2B), ("v3", D3)],
+            [("v2", "full_v2.json")],
+            [("v2", "v3", "inc_v2_v3.json")]),
+        "full_v2.json": _rows_json(V2B_ROWS),
+        "inc_v2_v3.json": json.dumps(INC23_FROM_B, ensure_ascii=False),
+    })
+
+
 SAMPLES = {
     "backup_good.zip": good_zip,
     "backup_missing.zip": missing_zip,
